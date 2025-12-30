@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>A Tuner Game</title>
+<style>
+html,body{
+  margin:0;height:100%;background:#111;color:#fff;
+  font-family:sans-serif;display:flex;gap:16px;padding:12px;box-sizing:border-box
+}
+
+.scoreboard{
+  width:320px;border-left:2px solid #333;
+  padding:12px;font-size:14px;order:2
+}
+
+.scoreboard h3{margin:0 0 8px 0;font-size:15px}
+
+.score-entry{margin-bottom:6px;opacity:.95;padding:6px;background:#171717;border-radius:4px}
+
+.main{
+  flex:1;display:flex;flex-direction:column;order:1
+}
+
+.top,.detune10{
+  display:flex;flex-wrap:wrap;justify-content:center;
+  gap:6px;padding:10px
+}
+
+.divider{height:2px;background:#333;margin:0 20px}
+
+.note,.detune,.game-btn{
+  background:#222;border:none;color:white;
+  padding:6px 10px;border-radius:6px;
+  cursor:pointer;font-size:13px
+}
+
+.center{
+  flex:1;display:flex;justify-content:center;align-items:center
+}
+
+.controls{
+  display:flex;align-items:center;gap:40px;position:relative
+}
+
+.main-btn{ /* play target label */
+  width:200px;height:200px;border-radius:50%;
+  background:red;color:white;font-size:24px;
+  box-shadow:0 0 30px rgba(255,0,0,.6)
+}
+
+.side{
+  width:80px;height:80px;border-radius:50%;
+  background:#333;color:white;font-size:32px
+}
+
+.label{text-align:center;margin-top:8px}
+
+.float-score{
+  position:absolute;font-size:28px;
+  animation:float 1s ease-out forwards;
+  pointer-events:none
+}
+
+@keyframes float{
+  from{opacity:1;transform:translateY(0)}
+  to{opacity:0;transform:translateY(-40px)}
+}
+
+.bottom{
+  padding:20px;display:flex;
+  justify-content:space-between;align-items:flex-start
+}
+
+.info{font-size:14px;opacity:.9;white-space:pre-line}
+
+.entries{max-height:240px;overflow:auto;margin-top:8px;border-top:1px solid rgba(255,255,255,0.04);padding-top:8px}
+.entry{display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px dashed rgba(255,255,255,0.02)}
+
+</style>
+</head>
+<body>
+
+<div class="main">
+
+  <div class="top" id="noteRow"></div>
+  <div class="divider"></div>
+  <div class="detune10" id="detuneRow"></div>
+
+  <div class="center">
+    <div class="controls">
+      <button class="side" id="minus">−</button>
+      <div>
+        <button class="main-btn" id="play">A4</button>
+        <div class="label" id="cents">0 cents</div>
+      </div>
+      <button class="side" id="plus">+</button>
+    </div>
+  </div>
+
+  <div class="bottom">
+    <div>
+      <button class="game-btn" id="playRand">Play Target</button>
+    </div>
+    <div style="text-align:right">
+      <button class="game-btn" id="submit">Submit</button>
+      <div class="info" id="result"></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="scoreboard" id="scoreboard">
+  <h3>Rounds</h3>
+  <div style="display:flex;gap:8px;align-items:center;margin:8px 0">
+    <div style="flex:1">Current Round: <span id="roundNum">1</span></div>
+    <div>Pitch: <span id="pitchNum">0</span>/<span id="pitchTotal">5</span></div>
+  </div>
+  <div style="margin:6px 0">
+    Sort: <select id="sortBy"><option value="round">Round #</option><option value="score">Score</option></select>
+  </div>
+  <div id="board"></div>
+
+  <h3 style="margin-top:12px">Current Round</h3>
+  <div id="currentStats"></div>
+  <div class="entries" id="entries"></div>
+  <div style="margin-top:10px">
+    <button class="game-btn" id="startRound" style="display:none">Start New Round</button>
+  </div>
+</div>
+
+<script>
+const A3 = 220;
+const notes = ["A","A#","B","C","C#","D","D#","E","F","F#","G","G#"];
+
+let baseIndex = 12, detune = 0;
+let randIndex = null, randDetune = 0;
+
+let round = 1, step = 0;
+const pitchesPerRound = 5;
+let listenPenalty = 0;
+
+const rounds = []; // completed rounds
+let currentEntries = []; // entries for active round
+
+const board = document.getElementById("board");
+const entriesEl = document.getElementById("entries");
+const currentStats = document.getElementById("currentStats");
+
+let audioCtx = null;
+let activeOsc = null;
+
+function freq(i){ return A3*Math.pow(2,i/12); }
+function label(i){ return notes[i%12] + (3 + Math.floor(i/12)); }
+
+function ensureAudio(){ if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+function stopActive(){ if(activeOsc){ try{ activeOsc.stop(); }catch(e){} activeOsc.disconnect(); activeOsc=null; }}
+function play(f,c){
+  ensureAudio(); stopActive();
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  g.gain.value = 0.25; o.type = 'sine'; o.frequency.value = f; o.detune.value = c;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(); activeOsc = o;
+  setTimeout(()=>{ try{o.stop()}catch(e){} stopActive(); },2000);
+}
+
+function pick(){
+  randIndex = Math.floor(Math.random()*25);
+  randDetune = Math.floor(Math.random()*41)-20;
+  listenPenalty = 0;
+  document.getElementById("result").textContent = "";
+}
+
+
+function animate(delta){
+  const el=document.createElement("div"); el.className="float-score";
+  el.textContent=(delta>0?"+":"")+delta;
+  const t=Math.max(0,Math.min(1,delta/80)); el.style.color=`hsl(${t*120},80%,50%)`;
+  document.querySelector(".controls").appendChild(el); setTimeout(()=>el.remove(),1000);
+}
+
+document.getElementById("play").onclick = ()=>{
+  // play the user's adjusted pitch (baseIndex + detune)
+  play(freq(baseIndex), detune);
+  listenPenalty += 2;
+};
+
+document.getElementById("playRand").onclick = ()=>{
+  if(randIndex==null) pick();
+  play(freq(randIndex), randDetune);
+};
+
+function pushRoundToBoard(r){
+  const e = document.createElement('div'); e.className='score-entry';
+  const total = r.entries.reduce((s,it)=>s+it.score,0);
+  e.textContent = `Round ${r.number}: ${total}`;
+  e.dataset.round = r.number; e.dataset.score = total;
+  board.prepend(e);
+}
+
+function renderCurrentEntries(){
+  document.getElementById('roundNum').textContent = round;
+  document.getElementById('pitchTotal').textContent = pitchesPerRound;
+  document.getElementById('pitchNum').textContent = Math.min(step+1, pitchesPerRound);
+
+  entriesEl.innerHTML = '';
+  currentEntries.forEach((it,idx)=>{
+    const d = document.createElement('div');
+    d.className='entry';
+    d.innerHTML = `
+      <div>
+        #${idx+1}<br>
+        Guess: ${it.guessLabel} ${it.guessDetune}c<br>
+        Target: ${it.targetLabel} ${it.targetDetune}c
+      </div>
+      <div>
+        ${it.semiDiff} st<br>
+        ${it.centsDiff} c
+      </div>
+      <div>
+        ${it.score}
+      </div>
+    `;
+    entriesEl.appendChild(d);
+  });
+}
+
+function finishRound(){
+  rounds.push({ number: round, entries: currentEntries.slice() });
+  pushRoundToBoard(rounds[rounds.length-1]);
+  document.getElementById('startRound').style.display = 'inline-block';
+  document.getElementById('submit').disabled = true;
+}
+
+function resetForNewRound(){
+  round++;
+  step = 0; currentEntries = []; document.getElementById('result').textContent = '';
+  document.getElementById('startRound').style.display = 'none';
+  document.getElementById('submit').disabled = false;
+  renderRounds();
+  pick(); renderCurrentEntries();
+}
+
+document.getElementById('startRound').onclick = ()=>{ resetForNewRound(); };
+document.getElementById('sortBy').onchange = ()=>{ renderRounds(); };
+
+function renderRounds(){
+  const container = document.getElementById('board'); container.innerHTML = '';
+  const mode = document.getElementById('sortBy').value;
+  const list = rounds.slice();
+  if(mode==='score') list.sort((a,b)=>{
+    const sa = a.entries.reduce((s,it)=>s+it.score,0);
+    const sb = b.entries.reduce((s,it)=>s+it.score,0);
+    return sb - sa;
+  });
+  else list.sort((a,b)=>a.number - b.number);
+  list.forEach(r=> pushRoundToBoard(r));
+}
+
+document.getElementById("submit").onclick=()=>{
+    if(randIndex==null) pick();
+
+  const guessIndex = baseIndex;
+  const guessDetune = detune;
+
+  const semiDiff = guessIndex - randIndex;
+  const centsDiff = guessDetune - randDetune;
+
+  const absSemi = Math.abs(semiDiff);
+  const absCents = Math.abs(centsDiff);
+
+  let s = 0;
+  if(absSemi===0) s += 50;
+  else if(absSemi===1) s += 20;
+
+  s += Math.max(0,30 - absCents);
+  s -= listenPenalty;
+  s = Math.max(0, Math.round(s));
+
+  animate(s);
+
+  document.getElementById("result").textContent =
+    `Guess: ${label(guessIndex)} ${guessDetune}c
+Target: ${label(randIndex)} ${randDetune}c
+Diff: ${semiDiff} st, ${centsDiff} c
+Score: ${s}`;
+
+  currentEntries.push({
+    guessLabel: label(guessIndex),
+    guessDetune,
+    targetLabel: label(randIndex),
+    targetDetune: randDetune,
+    semiDiff,
+    centsDiff,
+    score: s
+  });
+
+  renderCurrentEntries();
+
+  step++;
+  if(step >= pitchesPerRound){ finishRound(); }
+  else { pick(); }
+};
+
+document.getElementById("plus").onclick=()=>{ detune++; update(); }
+document.getElementById("minus").onclick=()=>{ detune--; update(); }
+
+function update(){ document.getElementById("cents").textContent = `${detune} cents`; }
+
+function setup(){
+  for(let i=0;i<25;i++){
+    const b=document.createElement("button"); b.className="note"; b.textContent=label(i);
+    b.onclick=()=>{ baseIndex=i; detune=0; document.getElementById("play").textContent=label(i); update(); };
+    noteRow.appendChild(b);
+  }
+  [-50,-40,-30,-20,-10,10,20,30,40,50].forEach(v=>{
+    const b=document.createElement("button"); b.className="detune"; b.textContent=v>0?`+${v}`:v;
+    b.onclick=()=>{ detune+=v; update(); };
+    detuneRow.appendChild(b);
+  });
+  currentEntries = [];
+  document.getElementById('pitchTotal').textContent = pitchesPerRound;
+  pick(); renderCurrentEntries();
+}
+
+setup();
+</script>
+</body>
+</html>
